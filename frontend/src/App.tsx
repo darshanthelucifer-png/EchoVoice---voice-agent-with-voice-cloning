@@ -3,17 +3,50 @@
  * ------------------------------------------------
  */
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   Mic,
   Sparkles,
   Radio,
   BookOpen,
+  User,
+  LogIn,
+  LogOut,
 } from "lucide-react";
 import { VoiceStudio } from "./components/VoiceStudio";
+import { AuthModal } from "./components/AuthModal";
+import {
+  fetchCurrentUser,
+  ensureAuthenticatedSession,
+  clearAuthToken,
+} from "./services/api";
+import type { UserProfile } from "./services/api";
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<"studio" | "agent" | "knowledge">("studio");
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
+
+  // Auto-bootstrap active session on mount
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        await ensureAuthenticatedSession();
+        const user = await fetchCurrentUser();
+        if (user) {
+          setCurrentUser(user);
+        }
+      } catch (err) {
+        console.warn("Session auto-bootstrap notice:", err);
+      }
+    };
+    initAuth();
+  }, []);
+
+  const handleSignOut = () => {
+    clearAuthToken();
+    setCurrentUser(null);
+  };
 
   return (
     <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
@@ -21,7 +54,7 @@ export const App: React.FC = () => {
       <header
         style={{
           borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
-          background: "rgba(9, 13, 22, 0.8)",
+          background: "rgba(9, 13, 22, 0.85)",
           backdropFilter: "blur(12px)",
           position: "sticky",
           top: 0,
@@ -139,8 +172,70 @@ export const App: React.FC = () => {
             </button>
           </nav>
 
-          {/* Model Status Pill */}
+          {/* User & Model Status Pill */}
           <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+            {/* User Account Controls */}
+            {currentUser ? (
+              <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                <button
+                  onClick={() => setIsAuthModalOpen(true)}
+                  style={{
+                    background: "rgba(99, 102, 241, 0.15)",
+                    border: "1px solid rgba(99, 102, 241, 0.35)",
+                    color: "#c7d2fe",
+                    fontSize: "0.75rem",
+                    fontWeight: 600,
+                    padding: "0.35rem 0.75rem",
+                    borderRadius: "9999px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.45rem",
+                    cursor: "pointer",
+                  }}
+                  title="Switch user account"
+                >
+                  <User size={13} color="#818cf8" />
+                  <span>{currentUser.full_name || currentUser.email}</span>
+                </button>
+                <button
+                  onClick={handleSignOut}
+                  style={{
+                    background: "rgba(255, 255, 255, 0.05)",
+                    border: "1px solid rgba(255, 255, 255, 0.1)",
+                    color: "#94a3b8",
+                    padding: "0.35rem 0.5rem",
+                    borderRadius: "9999px",
+                    cursor: "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                  title="Sign Out"
+                >
+                  <LogOut size={13} />
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setIsAuthModalOpen(true)}
+                className="gradient-btn"
+                style={{
+                  fontSize: "0.75rem",
+                  fontWeight: 600,
+                  padding: "0.35rem 0.85rem",
+                  borderRadius: "9999px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.4rem",
+                  cursor: "pointer",
+                }}
+              >
+                <LogIn size={13} />
+                Sign In / Demo
+              </button>
+            )}
+
+            {/* Model Status Pill */}
             <div
               style={{
                 background: "rgba(16, 185, 129, 0.15)",
@@ -156,7 +251,7 @@ export const App: React.FC = () => {
               }}
             >
               <span style={{ width: "8px", height: "8px", borderRadius: "50%", background: "#10b981", display: "inline-block" }} />
-              XTTS-v2 / Backend Connected
+              XTTS-v2 / Connected
             </div>
           </div>
         </div>
@@ -164,7 +259,12 @@ export const App: React.FC = () => {
 
       {/* Main Content Area */}
       <main style={{ flex: 1 }}>
-        {activeTab === "studio" && <VoiceStudio />}
+        {activeTab === "studio" && (
+          <VoiceStudio
+            currentUser={currentUser}
+            onOpenAuth={() => setIsAuthModalOpen(true)}
+          />
+        )}
 
         {activeTab === "agent" && (
           <div style={{ maxWidth: "800px", margin: "4rem auto", textAlign: "center", padding: "2rem" }} className="glass-card">
@@ -196,6 +296,15 @@ export const App: React.FC = () => {
           </div>
         )}
       </main>
+
+      {/* Auth Modal */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        onAuthSuccess={(user) => {
+          setCurrentUser(user);
+        }}
+      />
 
       {/* Footer */}
       <footer

@@ -39,6 +39,7 @@ import {
   FileText,
   BarChart3,
   StopCircle,
+  User,
 } from "lucide-react";
 import {
   analyzeAudioQuality,
@@ -53,12 +54,14 @@ import {
   cancelTTSJob,
   resumeTTSJob,
   API_BASE,
+  getAuthToken,
 } from "../services/api";
 import type {
   AudioQualityMetrics,
   CleanPreviewResult,
   VoiceProfile,
   TTSJob,
+  UserProfile,
 } from "../services/api";
 
 const TELEPROMPTER_PROMPTS = [
@@ -76,7 +79,12 @@ const TELEPROMPTER_PROMPTS = [
   },
 ];
 
-export const VoiceStudio: React.FC = () => {
+interface VoiceStudioProps {
+  currentUser?: UserProfile | null;
+  onOpenAuth?: () => void;
+}
+
+export const VoiceStudio: React.FC<VoiceStudioProps> = ({ currentUser, onOpenAuth }) => {
   // Navigation: "wizard" | "synthesis" | "library"
   const [studioMode, setStudioMode] = useState<"wizard" | "synthesis" | "library">("wizard");
   const [currentStep, setCurrentStep] = useState<1 | 2 | 3>(1);
@@ -130,6 +138,7 @@ export const VoiceStudio: React.FC = () => {
     "Welcome to EchoVoice. This is a studio-grade voice synthesis test demonstration using our cloned voice model."
   );
   const [synthesisEngine, setSynthesisEngine] = useState<string>("xtts_v2");
+  const [synthesisLanguage, setSynthesisLanguage] = useState<string>("en");
   const [masteringPreset, setMasteringPreset] = useState<string>("youtube_voiceover");
   const [isSynthesizing, setIsSynthesizing] = useState<boolean>(false);
   const [synthesisAudioUrl, setSynthesisAudioUrl] = useState<string | null>(null);
@@ -160,7 +169,7 @@ export const VoiceStudio: React.FC = () => {
 
   useEffect(() => {
     loadProfiles();
-  }, [loadProfiles]);
+  }, [currentUser, loadProfiles]);
 
   useEffect(() => {
     return () => {
@@ -236,6 +245,78 @@ export const VoiceStudio: React.FC = () => {
     }
   };
 
+// Helper to convert recorded WebM / browser audio to standard 16-bit PCM WAV
+async function convertToWavBlob(sourceBlob: Blob): Promise<Blob> {
+  try {
+    const arrayBuffer = await sourceBlob.arrayBuffer();
+    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+    const wavBlob = encodeAudioBufferToWav(audioBuffer);
+    await audioCtx.close().catch(() => {});
+    return wavBlob;
+  } catch (err) {
+    console.warn("WAV conversion notice (using original):", err);
+    return sourceBlob;
+  }
+}
+
+function encodeAudioBufferToWav(buffer: AudioBuffer): Blob {
+  const numChannels = 1;
+  const sampleRate = buffer.sampleRate;
+  const bitDepth = 16;
+  const channelData = buffer.numberOfChannels > 1
+    ? mixToMonoChannel(buffer)
+    : buffer.getChannelData(0);
+
+  const bytesPerSample = bitDepth / 8;
+  const blockAlign = numChannels * bytesPerSample;
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = channelData.length * bytesPerSample;
+  const bufferSize = 44 + dataSize;
+
+  const arrayBuffer = new ArrayBuffer(bufferSize);
+  const view = new DataView(arrayBuffer);
+
+  const writeString = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  };
+
+  writeString(0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(8, "WAVE");
+  writeString(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM format
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitDepth, true);
+  writeString(36, "data");
+  view.setUint32(40, dataSize, true);
+
+  let offset = 44;
+  for (let i = 0; i < channelData.length; i++) {
+    const s = Math.max(-1, Math.min(1, channelData[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    offset += 2;
+  }
+
+  return new Blob([arrayBuffer], { type: "audio/wav" });
+}
+
+function mixToMonoChannel(buffer: AudioBuffer): Float32Array {
+  const left = buffer.getChannelData(0);
+  const right = buffer.getChannelData(1);
+  const mono = new Float32Array(left.length);
+  for (let i = 0; i < left.length; i++) {
+    mono[i] = (left[i] + right[i]) / 2;
+  }
+  return mono;
+}
+
   // -------------------------------------------------------------
   // Live Mic Recording
   // -------------------------------------------------------------
@@ -266,14 +347,15 @@ export const VoiceStudio: React.FC = () => {
         stopVisualizer();
         stream.getTracks().forEach((track) => track.stop());
 
-        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-        setAudioBlob(blob);
-        const url = URL.createObjectURL(blob);
+        const rawBlob = new Blob(audioChunksRef.current, { type: mediaRecorder.mimeType || "audio/webm" });
+        const finalBlob = await convertToWavBlob(rawBlob);
+        setAudioBlob(finalBlob);
+        const url = URL.createObjectURL(finalBlob);
         setAudioUrl(url);
         setFileName(`recording_${new Date().toISOString().slice(11, 19).replace(/:/g, "-")}.wav`);
 
         // Trigger automatic quality analysis
-        await runQualityAnalysis(blob);
+        await runQualityAnalysis(finalBlob);
       };
 
       mediaRecorder.start(250);
@@ -431,7 +513,18 @@ export const VoiceStudio: React.FC = () => {
   // -------------------------------------------------------------
   const handleEnrollProfile = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!audioBlob || !consentChecked || !profileName.trim()) return;
+    if (!audioBlob) {
+      alert("No audio recording found. Please complete Step 1 first.");
+      return;
+    }
+    if (!consentChecked) {
+      alert("Mandatory consent affirmation is required before creating a voice profile.");
+      return;
+    }
+    if (!profileName.trim()) {
+      alert("Please provide a name for this voice profile.");
+      return;
+    }
 
     setIsEnrolling(true);
     try {
@@ -450,7 +543,16 @@ export const VoiceStudio: React.FC = () => {
         setConsentChecked(false);
       }, 1500);
     } catch (err: any) {
-      alert(`Enrollment failed: ${err.message}`);
+      const msg = err.message || "An unknown error occurred.";
+      if (msg.toLowerCase().includes("not authenticated") || msg.toLowerCase().includes("credentials")) {
+        if (onOpenAuth) {
+          onOpenAuth();
+        } else {
+          alert("Session expired or not authenticated. Please sign in to create voice profiles.");
+        }
+      } else {
+        alert(`Enrollment failed: ${msg}`);
+      }
     } finally {
       setIsEnrolling(false);
     }
@@ -491,7 +593,7 @@ export const VoiceStudio: React.FC = () => {
       const res = await synthesizeSpeech({
         text: synthesisText,
         speaker_wav_path: selectedProfile?.reference_audio_path,
-        language: "en",
+        language: synthesisLanguage,
         speed: 1.0,
         engine: synthesisEngine,
       });
@@ -505,34 +607,38 @@ export const VoiceStudio: React.FC = () => {
     }
   };
 
+  const startJobPolling = (jobId: string) => {
+    if (jobPollingInterval) {
+      clearInterval(jobPollingInterval);
+    }
+    const interval = window.setInterval(async () => {
+      try {
+        const updated = await getTTSJob(jobId);
+        setActiveJob(updated);
+        if (updated.status === "COMPLETED" || updated.status === "FAILED" || updated.status === "CANCELLED") {
+          clearInterval(interval);
+          setIsSynthesizing(false);
+        }
+      } catch {
+        // ignore transient poll error
+      }
+    }, 1000);
+    setJobPollingInterval(interval);
+  };
+
   const handleStartLongFormJob = async () => {
     setIsSynthesizing(true);
     try {
       const job = await submitTTSJob({
         script_text: synthesisText,
         voice_profile_id: selectedVoiceProfileId || undefined,
-        target_language: "en",
+        target_language: synthesisLanguage,
         engine: synthesisEngine,
         mastering_preset: masteringPreset,
       });
 
       setActiveJob(job);
-
-      // Start polling status
-      const interval = window.setInterval(async () => {
-        try {
-          const updated = await getTTSJob(job.id);
-          setActiveJob(updated);
-          if (updated.status === "COMPLETED" || updated.status === "FAILED" || updated.status === "CANCELLED") {
-            clearInterval(interval);
-            setIsSynthesizing(false);
-          }
-        } catch {
-          // ignore transient poll error
-        }
-      }, 1000);
-
-      setJobPollingInterval(interval);
+      startJobPolling(job.id);
     } catch (err: any) {
       alert(`Failed to start long-form job: ${err.message}`);
       setIsSynthesizing(false);
@@ -541,16 +647,22 @@ export const VoiceStudio: React.FC = () => {
 
   const handleCancelJob = async () => {
     if (!activeJob) return;
+    if (jobPollingInterval) {
+      clearInterval(jobPollingInterval);
+    }
     await cancelTTSJob(activeJob.id);
     const updated = await getTTSJob(activeJob.id);
     setActiveJob(updated);
+    setIsSynthesizing(false);
   };
 
   const handleResumeJob = async () => {
     if (!activeJob) return;
+    setIsSynthesizing(true);
     await resumeTTSJob(activeJob.id);
     const updated = await getTTSJob(activeJob.id);
     setActiveJob(updated);
+    startJobPolling(activeJob.id);
   };
 
   return (
@@ -998,6 +1110,47 @@ export const VoiceStudio: React.FC = () => {
                 </p>
               </div>
 
+              {/* Active Studio Account Bar */}
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  background: "rgba(99, 102, 241, 0.08)",
+                  border: "1px solid rgba(99, 102, 241, 0.25)",
+                  borderRadius: "0.5rem",
+                  padding: "0.75rem 1rem",
+                  marginBottom: "1.25rem",
+                  fontSize: "0.85rem",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                  <User size={16} color="#818cf8" />
+                  <span style={{ color: "#94a3b8" }}>Enrolling to account:</span>
+                  <strong style={{ color: "#e0e7ff" }}>
+                    {currentUser ? (currentUser.full_name || currentUser.email) : "demo@echovoice.ai (Demo Studio Account)"}
+                  </strong>
+                </div>
+                {onOpenAuth && (
+                  <button
+                    type="button"
+                    onClick={onOpenAuth}
+                    style={{
+                      background: "rgba(99, 102, 241, 0.2)",
+                      border: "1px solid rgba(165, 180, 252, 0.3)",
+                      color: "#c7d2fe",
+                      padding: "0.25rem 0.6rem",
+                      borderRadius: "0.4rem",
+                      fontSize: "0.75rem",
+                      cursor: "pointer",
+                      fontWeight: 600,
+                    }}
+                  >
+                    Switch Account
+                  </button>
+                )}
+              </div>
+
               <form onSubmit={handleEnrollProfile} style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
                 <div>
                   <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, color: "#cbd5e1", marginBottom: "0.5rem" }}>
@@ -1088,7 +1241,7 @@ export const VoiceStudio: React.FC = () => {
             {/* Voice Profile Picker */}
             <div style={{ marginBottom: "1.25rem" }}>
               <label style={{ display: "block", fontSize: "0.85rem", fontWeight: 600, color: "#cbd5e1", marginBottom: "0.5rem" }}>
-                Target Voice Profile
+                Target Voice Profile (Your Cloned Voice)
               </label>
               <select
                 value={selectedVoiceProfileId}
@@ -1102,6 +1255,78 @@ export const VoiceStudio: React.FC = () => {
                   </option>
                 ))}
               </select>
+            </div>
+
+            {/* Target Language Selector & Multi-Language Pills */}
+            <div style={{ marginBottom: "1.25rem" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.4rem" }}>
+                <label style={{ fontSize: "0.85rem", fontWeight: 600, color: "#cbd5e1" }}>
+                  Target Language (Zero-Shot Cross-Lingual Voice Cloning)
+                </label>
+                <span style={{ fontSize: "0.75rem", color: "#a5b4fc", fontWeight: 600 }}>
+                  17 Languages Supported
+                </span>
+              </div>
+              <select
+                value={synthesisLanguage}
+                onChange={(e) => setSynthesisLanguage(e.target.value)}
+                style={{ width: "100%", background: "rgba(15, 23, 42, 0.7)", border: "1px solid rgba(255, 255, 255, 0.15)", borderRadius: "0.5rem", padding: "0.65rem", color: "#fff", fontSize: "0.85rem", marginBottom: "0.6rem" }}
+              >
+                <option value="en">🇺🇸 English (United States / Global)</option>
+                <option value="es">🇪🇸 Spanish (Español)</option>
+                <option value="fr">🇫🇷 French (Français)</option>
+                <option value="de">🇩🇪 German (Deutsch)</option>
+                <option value="it">🇮🇹 Italian (Italiano)</option>
+                <option value="pt">🇵🇹 Portuguese (Português)</option>
+                <option value="pl">🇵🇱 Polish (Polski)</option>
+                <option value="tr">🇹🇷 Turkish (Türkçe)</option>
+                <option value="ru">🇷🇺 Russian (Русский)</option>
+                <option value="nl">🇳🇱 Dutch (Nederlands)</option>
+                <option value="cs">🇨🇿 Czech (Čeština)</option>
+                <option value="ar">🇸🇦 Arabic (العربية)</option>
+                <option value="zh-cn">🇨🇳 Chinese (中文)</option>
+                <option value="ja">🇯🇵 Japanese (日本語)</option>
+                <option value="ko">🇰🇷 Korean (한국어)</option>
+                <option value="hu">🇭🇺 Hungarian (Magyar)</option>
+                <option value="hi">🇮🇳 Hindi (हिन्दी)</option>
+              </select>
+
+              {/* Quick Multi-Language Script Sample Pills */}
+              <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
+                {[
+                  { lang: "en", label: "🇺🇸 English", text: "Welcome to EchoVoice. This is my cloned voice speaking in real-time." },
+                  { lang: "es", label: "🇪🇸 Spanish", text: "Bienvenido a EchoVoice. Esta es mi voz clonada hablando en español con entonación natural." },
+                  { lang: "fr", label: "🇫🇷 French", text: "Bienvenue sur EchoVoice. Ceci est ma voix clonée en français avec une clarté broadcast." },
+                  { lang: "hi", label: "🇮🇳 Hindi", text: "इको वॉयस में आपका स्वागत है। यह मेरी क्लोन की गई आवाज है जो अब हिंदी में बोल रही है।" },
+                  { lang: "de", label: "🇩🇪 German", text: "Willkommen bei EchoVoice. Dies ist meine geklonte Stimme, die fließend Deutsch spricht." },
+                  { lang: "ja", label: "🇯🇵 Japanese", text: "EchoVoiceへようこそ。これは私のクローンされた声です。" },
+                  { lang: "zh-cn", label: "🇨🇳 Chinese", text: "欢迎使用EchoVoice。这是我的AI克隆声音，支持多语言实时生成。" },
+                ].map((sample) => (
+                  <button
+                    key={sample.lang}
+                    type="button"
+                    onClick={() => {
+                      setSynthesisLanguage(sample.lang);
+                      setSynthesisText(sample.text);
+                    }}
+                    style={{
+                      background: synthesisLanguage === sample.lang ? "rgba(99, 102, 241, 0.3)" : "rgba(255, 255, 255, 0.05)",
+                      border: synthesisLanguage === sample.lang ? "1px solid #818cf8" : "1px solid rgba(255, 255, 255, 0.1)",
+                      color: synthesisLanguage === sample.lang ? "#c7d2fe" : "#94a3b8",
+                      borderRadius: "9999px",
+                      padding: "0.25rem 0.65rem",
+                      fontSize: "0.72rem",
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.25rem",
+                      fontWeight: synthesisLanguage === sample.lang ? 600 : 400,
+                    }}
+                  >
+                    {sample.label}
+                  </button>
+                ))}
+              </div>
             </div>
 
             {/* Script Text Input */}
@@ -1118,7 +1343,7 @@ export const VoiceStudio: React.FC = () => {
                 rows={6}
                 value={synthesisText}
                 onChange={(e) => setSynthesisText(e.target.value)}
-                placeholder="Type or paste text to synthesize..."
+                placeholder="Type or paste text in any language to synthesize in your cloned voice..."
                 style={{ width: "100%", background: "rgba(15, 23, 42, 0.7)", border: "1px solid rgba(255, 255, 255, 0.15)", borderRadius: "0.5rem", padding: "1rem", color: "#fff", fontSize: "0.95rem", lineHeight: "1.5" }}
               />
             </div>
@@ -1203,8 +1428,18 @@ export const VoiceStudio: React.FC = () => {
                   </h3>
                   <span
                     style={{
-                      background: activeJob.status === "COMPLETED" ? "rgba(16, 185, 129, 0.2)" : "rgba(99, 102, 241, 0.2)",
-                      color: activeJob.status === "COMPLETED" ? "#34d399" : "#a5b4fc",
+                      background:
+                        activeJob.status === "COMPLETED"
+                          ? "rgba(16, 185, 129, 0.2)"
+                          : activeJob.status === "FAILED"
+                          ? "rgba(239, 68, 68, 0.2)"
+                          : "rgba(99, 102, 241, 0.2)",
+                      color:
+                        activeJob.status === "COMPLETED"
+                          ? "#34d399"
+                          : activeJob.status === "FAILED"
+                          ? "#f87171"
+                          : "#a5b4fc",
                       fontSize: "0.75rem",
                       fontWeight: 700,
                       padding: "0.2rem 0.6rem",
@@ -1224,19 +1459,50 @@ export const VoiceStudio: React.FC = () => {
                     </span>
                   </div>
                   <div style={{ width: "100%", height: "8px", background: "rgba(255, 255, 255, 0.1)", borderRadius: "4px", overflow: "hidden" }}>
-                    <div style={{ width: `${activeJob.progress}%`, height: "100%", background: "linear-gradient(90deg, #6366f1 0%, #06b6d4 100%)", transition: "width 0.4s ease" }} />
+                    <div style={{ width: `${activeJob.progress}%`, height: "100%", background: activeJob.status === "FAILED" ? "linear-gradient(90deg, #ef4444 0%, #dc2626 100%)" : "linear-gradient(90deg, #6366f1 0%, #06b6d4 100%)", transition: "width 0.4s ease" }} />
                   </div>
                 </div>
 
-                {/* Master Download Buttons */}
+                {/* Failure Error Display & Retry */}
+                {activeJob.status === "FAILED" && (
+                  <div style={{ marginTop: "1rem", background: "rgba(239, 68, 68, 0.1)", border: "1px solid rgba(239, 68, 68, 0.3)", borderRadius: "0.5rem", padding: "0.85rem", color: "#fca5a5", fontSize: "0.85rem" }}>
+                    <div style={{ fontWeight: 600, marginBottom: "0.3rem", display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                      <AlertCircle size={16} /> Generation Alert
+                    </div>
+                    <div style={{ fontSize: "0.8rem", color: "#fecaca", lineHeight: 1.4 }}>
+                      {activeJob.error_message || "An unexpected error occurred during synthesis."}
+                    </div>
+                    <button
+                      onClick={handleStartLongFormJob}
+                      style={{ marginTop: "0.75rem", width: "100%", background: "rgba(99, 102, 241, 0.3)", border: "1px solid rgba(99, 102, 241, 0.5)", color: "#fff", padding: "0.45rem", borderRadius: "0.4rem", fontSize: "0.8rem", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.4rem", fontWeight: 600 }}
+                    >
+                      <RefreshCw size={14} /> Re-Generate Long-Form Speech
+                    </button>
+                  </div>
+                )}
+
+                {/* Master Audio Preview & Download Buttons */}
                 {activeJob.status === "COMPLETED" && (
-                  <div style={{ marginTop: "1.5rem" }}>
+                  <div style={{ marginTop: "1.25rem" }}>
                     <div style={{ fontSize: "0.85rem", fontWeight: 600, color: "#34d399", marginBottom: "0.75rem" }}>
                       ✓ Studio Master Completed (-14.0 LUFS YouTube Standard)
                     </div>
+
+                    {/* In-Browser Master Audio Player */}
+                    <div style={{ marginBottom: "1rem", background: "rgba(15, 23, 42, 0.6)", padding: "0.75rem", borderRadius: "0.5rem", border: "1px solid rgba(255, 255, 255, 0.08)" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", fontSize: "0.75rem", color: "#94a3b8", marginBottom: "0.4rem" }}>
+                        <Headphones size={13} color="#34d399" /> Master Output Audio Preview:
+                      </div>
+                      <audio
+                        controls
+                        src={`${API_BASE}/tts-jobs/${activeJob.id}/download/mp3?token=${encodeURIComponent(getAuthToken() || "")}`}
+                        style={{ width: "100%", height: "36px" }}
+                      />
+                    </div>
+
                     <div style={{ display: "flex", gap: "0.5rem" }}>
                       <a
-                        href={`${API_BASE}/tts-jobs/${activeJob.id}/download/wav`}
+                        href={`${API_BASE}/tts-jobs/${activeJob.id}/download/wav?token=${encodeURIComponent(getAuthToken() || "")}`}
                         target="_blank"
                         rel="noreferrer"
                         style={{ flex: 1, background: "rgba(99, 102, 241, 0.2)", color: "#c7d2fe", border: "1px solid rgba(99, 102, 241, 0.3)", padding: "0.5rem", borderRadius: "0.4rem", fontSize: "0.75rem", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.3rem", textDecoration: "none", fontWeight: 600 }}
@@ -1244,7 +1510,7 @@ export const VoiceStudio: React.FC = () => {
                         <Download size={14} /> 24-bit WAV
                       </a>
                       <a
-                        href={`${API_BASE}/tts-jobs/${activeJob.id}/download/mp3`}
+                        href={`${API_BASE}/tts-jobs/${activeJob.id}/download/mp3?token=${encodeURIComponent(getAuthToken() || "")}`}
                         target="_blank"
                         rel="noreferrer"
                         style={{ flex: 1, background: "rgba(99, 102, 241, 0.2)", color: "#c7d2fe", border: "1px solid rgba(99, 102, 241, 0.3)", padding: "0.5rem", borderRadius: "0.4rem", fontSize: "0.75rem", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.3rem", textDecoration: "none", fontWeight: 600 }}
@@ -1252,7 +1518,7 @@ export const VoiceStudio: React.FC = () => {
                         <Download size={14} /> 320k MP3
                       </a>
                       <a
-                        href={`${API_BASE}/tts-jobs/${activeJob.id}/download/flac`}
+                        href={`${API_BASE}/tts-jobs/${activeJob.id}/download/flac?token=${encodeURIComponent(getAuthToken() || "")}`}
                         target="_blank"
                         rel="noreferrer"
                         style={{ flex: 1, background: "rgba(99, 102, 241, 0.2)", color: "#c7d2fe", border: "1px solid rgba(99, 102, 241, 0.3)", padding: "0.5rem", borderRadius: "0.4rem", fontSize: "0.75rem", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.3rem", textDecoration: "none", fontWeight: 600 }}

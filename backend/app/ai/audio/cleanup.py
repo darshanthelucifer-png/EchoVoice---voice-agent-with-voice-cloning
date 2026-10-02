@@ -97,6 +97,47 @@ class AudioCleanupPipeline:
     """
 
     @staticmethod
+    def _decode_with_av(source: Union[str, Path, bytes]) -> Tuple[np.ndarray, int]:
+        """
+        Universal fallback audio decoder using PyAV (supports WebM, Opus, MP4, AAC, OGG, etc.).
+        """
+        import av
+        import io
+
+        if isinstance(source, bytes):
+            container = av.open(io.BytesIO(source))
+        else:
+            container = av.open(str(source))
+
+        audio_streams = [s for s in container.streams if s.type == "audio"]
+        if not audio_streams:
+            raise ValueError("No audio stream found in source.")
+
+        stream = audio_streams[0]
+        resampler = av.AudioResampler(format="fltp", layout="mono")
+
+        chunks = []
+        sr = stream.codec_context.sample_rate or 24000
+
+        for packet in container.demux(stream):
+            for frame in packet.decode():
+                resampled = resampler.resample(frame)
+                if resampled:
+                    for rf in resampled:
+                        chunks.append(rf.to_ndarray()[0])
+
+        flushed = resampler.resample(None)
+        if flushed:
+            for rf in flushed:
+                chunks.append(rf.to_ndarray()[0])
+
+        if not chunks:
+            raise ValueError("Failed to decode audio frames from source.")
+
+        audio = np.concatenate(chunks).astype(np.float32)
+        return audio, sr
+
+    @staticmethod
     def load_audio(source: Union[str, Path, bytes, np.ndarray], target_sr: Optional[int] = None) -> Tuple[np.ndarray, int]:
         """
         Loads audio from file path, raw bytes, or numpy array.
@@ -105,9 +146,15 @@ class AudioCleanupPipeline:
         import io
 
         if isinstance(source, (str, Path)):
-            audio, sr = sf.read(str(source), dtype="float32")
+            try:
+                audio, sr = sf.read(str(source), dtype="float32")
+            except Exception:
+                audio, sr = AudioCleanupPipeline._decode_with_av(source)
         elif isinstance(source, bytes):
-            audio, sr = sf.read(io.BytesIO(source), dtype="float32")
+            try:
+                audio, sr = sf.read(io.BytesIO(source), dtype="float32")
+            except Exception:
+                audio, sr = AudioCleanupPipeline._decode_with_av(source)
         elif isinstance(source, np.ndarray):
             audio = source.astype(np.float32)
             sr = target_sr or 24000

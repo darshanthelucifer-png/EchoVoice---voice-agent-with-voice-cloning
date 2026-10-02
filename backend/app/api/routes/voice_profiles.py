@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.api.deps import get_db, get_current_user
+from app.api.deps import get_db, get_current_user, get_current_user_flexible
 from app.models.user import User
 from app.schemas.voice_profile import AudioQualityMetrics, VoiceProfileRead
 from app.schemas.common import APIResponse
@@ -245,11 +245,13 @@ async def delete_profile(
 )
 async def get_profile_reference_audio(
     profile_id: str,
-    current_user: User = Depends(get_current_user),
+    token: Optional[str] = None,
+    current_user: Optional[User] = Depends(get_current_user_flexible),
     db: AsyncSession = Depends(get_db)
 ):
     """Streams the cleaned reference audio clip for browser playback."""
-    profile = await voice_profile_service.get_profile_by_id(db, profile_id, current_user.id)
+    user_id = current_user.id if current_user else None
+    profile = await voice_profile_service.get_profile_by_id(db, profile_id, user_id)
     if not profile or not profile.reference_audio_path or not Path(profile.reference_audio_path).exists():
         raise HTTPException(status_code=404, detail="Audio file not found.")
     return FileResponse(
@@ -265,11 +267,13 @@ async def get_profile_reference_audio(
 )
 async def get_profile_raw_audio(
     profile_id: str,
-    current_user: User = Depends(get_current_user),
+    token: Optional[str] = None,
+    current_user: Optional[User] = Depends(get_current_user_flexible),
     db: AsyncSession = Depends(get_db)
 ):
     """Streams the original raw recording for A/B comparison."""
-    profile = await voice_profile_service.get_profile_by_id(db, profile_id, current_user.id)
+    user_id = current_user.id if current_user else None
+    profile = await voice_profile_service.get_profile_by_id(db, profile_id, user_id)
     if not profile or not profile.raw_audio_path or not Path(profile.raw_audio_path).exists():
         raise HTTPException(status_code=404, detail="Raw audio file not found.")
     return FileResponse(

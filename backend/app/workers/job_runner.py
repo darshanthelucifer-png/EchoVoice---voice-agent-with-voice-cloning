@@ -100,37 +100,48 @@ class LongFormJobRunner:
         checkpoint_dir = self.get_checkpoint_dir(job_id)
         checkpoint_file = checkpoint_dir / "checkpoint.json"
         chunks_dir = checkpoint_dir / "chunks"
-
-        # 1. Fetch DB Job Record
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(select(TTSJob).where(TTSJob.id == job_id))
-            job = result.scalar_one_or_none()
-            if not job:
-                logger.error(f"Job {job_id} not found in database.")
-                return
-
-            # Update DB to PROCESSING
-            job.status = JobStatus.PROCESSING.value
-            job.checkpoint_dir = str(checkpoint_dir)
-            await db.commit()
-
-            # Retrieve Voice Profile reference audio if specified
-            speaker_wav_path: Optional[str] = None
-            ref_embedding: Optional[np.ndarray] = None
-            speaker_name = "EchoVoice Voice"
-
-            if job.voice_profile_id:
-                vp_res = await db.execute(
-                    select(VoiceProfile).where(VoiceProfile.id == job.voice_profile_id)
-                )
-                voice_profile = vp_res.scalar_one_or_none()
-                if voice_profile:
-                    speaker_name = voice_profile.name
-                    speaker_wav_path = voice_profile.reference_audio_path
-                    if voice_profile.embedding_path and Path(voice_profile.embedding_path).exists():
-                        ref_embedding = np.load(voice_profile.embedding_path)
+        checkpoint_data: Optional[Dict[str, Any]] = None
 
         try:
+            # 1. Fetch DB Job Record & Snapshot attributes inside session
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(select(TTSJob).where(TTSJob.id == job_id))
+                job = result.scalar_one_or_none()
+                if not job:
+                    logger.error(f"Job {job_id} not found in database.")
+                    return
+
+                # Update DB to PROCESSING
+                job.status = JobStatus.PROCESSING.value
+                job.checkpoint_dir = str(checkpoint_dir)
+                await db.commit()
+
+                # Snapshot all needed columns while session is active
+                script_text = job.script_text
+                target_language = job.target_language or "en"
+                engine_name = job.engine or settings.TTS_ENGINE
+                voice_profile_id = job.voice_profile_id
+
+                # Retrieve Voice Profile reference audio if specified
+                speaker_wav_path: Optional[str] = None
+                ref_embedding: Optional[np.ndarray] = None
+                speaker_name = "EchoVoice Voice"
+
+                if voice_profile_id:
+                    vp_res = await db.execute(
+                        select(VoiceProfile).where(VoiceProfile.id == voice_profile_id)
+                    )
+                    voice_profile = vp_res.scalar_one_or_none()
+                    if voice_profile:
+                        speaker_name = voice_profile.name
+                        speaker_wav_path = voice_profile.reference_audio_path
+                        emb_path = getattr(voice_profile, "speaker_embedding_path", None)
+                        if emb_path and Path(emb_path).exists():
+                            try:
+                                ref_embedding = np.load(emb_path)
+                            except Exception as e:
+                                logger.warning(f"Could not load speaker embedding from {emb_path}: {e}")
+
             # 2. Check for Existing Checkpoint or Initialize Chunker
             checkpoint_data = self._load_checkpoint_json(checkpoint_file)
 
@@ -143,7 +154,7 @@ class LongFormJobRunner:
                 total_chunks = checkpoint_data["total_chunks"]
             else:
                 # Fresh job: partition script into ~250 character acoustic units
-                script_chunks = chunker.chunk_text(job.script_text)
+                script_chunks = chunker.chunk_text(script_text)
                 total_chunks = len(script_chunks)
                 raw_chunks_meta = [
                     {
@@ -208,8 +219,8 @@ class LongFormJobRunner:
                 tts_output, _ = await self.tts_service.generate_speech(
                     text=chunk_text,
                     speaker_wav=speaker_wav_path,
-                    language=job.target_language,
-                    engine_name=job.engine,
+                    language=target_language,
+                    engine_name=engine_name,
                     output_filename=None
                 )
 
@@ -279,7 +290,7 @@ class LongFormJobRunner:
             qc_report = audio_qc_evaluator.evaluate(
                 audio=mastering_result.audio,
                 sr=mastering_result.sample_rate,
-                target_script=job.script_text,
+                target_script=script_text,
                 ref_embedding=ref_embedding
             )
 

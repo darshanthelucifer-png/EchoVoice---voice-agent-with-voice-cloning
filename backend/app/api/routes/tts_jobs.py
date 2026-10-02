@@ -9,12 +9,12 @@ PYTHON CONCEPTS DEMONSTRATED:
 - Dependency Injection: Secures routes with JWT `get_current_user` and database `get_db`.
 """
 
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db, get_current_user
+from app.api.deps import get_db, get_current_user, oauth2_scheme_optional, get_current_user_flexible
 from app.models.user import User
 from app.schemas.tts_job import TTSJobCreate, TTSJobRead
 from app.schemas.common import APIResponse
@@ -121,15 +121,23 @@ async def cancel_tts_job(
 async def download_mastered_audio(
     job_id: str,
     format_type: str,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    token: Optional[str] = Query(None),
+    bearer_token: Optional[str] = Depends(oauth2_scheme_optional),
+    db: AsyncSession = Depends(get_db)
 ):
     """
-    Downloads the YouTube-mastered audio file (-14 LUFS, -1.5 dBTP)
-    in the requested format.
+    Downloads or streams the YouTube-mastered audio file (-14 LUFS, -1.5 dBTP)
+    in the requested format. Supports both Bearer Authorization header and ?token= query parameter.
     """
+    current_user = await get_current_user_flexible(
+        db=db,
+        token_header=bearer_token,
+        token_query=token
+    )
+    user_id = current_user.id if current_user else None
+
     file_path, media_type, download_name = await tts_job_service.get_export_file(
-        db, job_id, current_user.id, format_type
+        db, job_id, user_id, format_type
     )
     return FileResponse(
         path=str(file_path),

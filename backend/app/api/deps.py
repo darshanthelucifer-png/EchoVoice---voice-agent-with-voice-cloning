@@ -9,7 +9,7 @@ PYTHON CONCEPTS DEMONSTRATED:
 - Exception Handling with HTTP 401 Bearer challenges.
 """
 
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -25,6 +25,11 @@ from app.services.auth_service import auth_service
 oauth2_scheme = OAuth2PasswordBearer(
     tokenUrl=f"{settings.API_V1_STR}/auth/login/oauth",
     auto_error=True
+)
+
+oauth2_scheme_optional = OAuth2PasswordBearer(
+    tokenUrl=f"{settings.API_V1_STR}/auth/login/oauth",
+    auto_error=False
 )
 
 
@@ -58,6 +63,31 @@ async def get_current_user(
             detail="Inactive user account"
         )
     return user
+
+
+async def get_current_user_flexible(
+    db: AsyncSession = Depends(get_db),
+    token_header: Optional[str] = Depends(oauth2_scheme_optional),
+    token_query: Optional[str] = None
+) -> Optional[User]:
+    """
+    Validates token from either Authorization header or ?token= query parameter.
+    Returns User if valid, or None if no token provided.
+    """
+    token = token_header or token_query
+    if not token:
+        return None
+    try:
+        payload = decode_access_token(token)
+        user_id: str = payload.get("sub")
+        if not user_id:
+            return None
+        user = await auth_service.get_by_id(db, user_id)
+        if user and user.is_active:
+            return user
+    except Exception:
+        return None
+    return None
 
 
 async def get_current_active_superuser(

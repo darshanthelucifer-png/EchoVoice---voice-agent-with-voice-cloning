@@ -154,14 +154,23 @@ class TTSJobService:
         self,
         db: AsyncSession,
         job_id: str,
-        user_id: str,
+        user_id: Optional[str],
         format_type: str
     ) -> Tuple[Path, str, str]:
         """
         Retrieves file path and mime type for mastered audio exports.
         Returns: (file_path, media_type, download_filename)
         """
-        job = await self.get_job(db, job_id, user_id)
+        if user_id:
+            job = await self.get_job(db, job_id, user_id)
+        else:
+            res = await db.execute(select(TTSJob).where(TTSJob.id == job_id))
+            job = res.scalar_one_or_none()
+            if not job:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="TTS Job not found."
+                )
 
         if job.status != JobStatus.COMPLETED.value:
             raise HTTPException(

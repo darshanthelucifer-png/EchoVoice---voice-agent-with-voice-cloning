@@ -2,6 +2,7 @@
  * EchoVoice Backend API Client (frontend/src/services/api.ts)
  * ------------------------------------------------------------
  * Handles communication with FastAPI backend:
+ * - Authentication & Session Management (Login, Register, Demo Auto-Login, /auth/me)
  * - Voice Profile creation, audio quality analysis, and restoration preview
  * - User voice profile library (list, preview, set default, delete)
  * - Real-time TTS synthesis (< 250 characters)
@@ -89,24 +90,148 @@ export interface TTSJob {
   updated_at: string;
 }
 
-export const API_BASE = "http://localhost:8000/api/v1";
+export interface UserProfile {
+  id: string;
+  email: string;
+  full_name?: string;
+  is_active: boolean;
+  is_superuser: boolean;
+  created_at: string;
+  updated_at: string;
+}
 
-// Auth token storage helper
+export const API_BASE = "http://localhost:8000/api/v1";
+export const TOKEN_KEY = "echovoice_token";
+
+// -------------------------------------------------------------
+// Authentication & Session Management
+// -------------------------------------------------------------
+
 export function getAuthToken(): string | null {
-  return localStorage.getItem("echovoice_token");
+  return localStorage.getItem(TOKEN_KEY);
 }
 
 export function setAuthToken(token: string): void {
-  localStorage.setItem("echovoice_token", token);
+  localStorage.setItem(TOKEN_KEY, token);
+}
+
+export function clearAuthToken(): void {
+  localStorage.removeItem(TOKEN_KEY);
+}
+
+export async function loginUser(email: string, password: string): Promise<string> {
+  const res = await fetch(`${API_BASE}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || "Authentication failed. Invalid email or password.");
+  }
+
+  const json = await res.json();
+  const token = json.data.access_token;
+  setAuthToken(token);
+  return token;
+}
+
+export async function registerUser(email: string, password: string, fullName?: string): Promise<string> {
+  const res = await fetch(`${API_BASE}/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      email,
+      password,
+      full_name: fullName || "Studio Artist",
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || "Registration failed.");
+  }
+
+  const json = await res.json();
+  const token = json.data.access_token;
+  setAuthToken(token);
+  return token;
+}
+
+export async function fetchCurrentUser(): Promise<UserProfile | null> {
+  const token = getAuthToken();
+  if (!token) return null;
+
+  try {
+    const res = await fetch(`${API_BASE}/auth/me`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (!res.ok) {
+      if (res.status === 401) {
+        clearAuthToken();
+      }
+      return null;
+    }
+
+    const json = await res.json();
+    return json.data;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ensures an active authenticated session exists.
+ * If no session is found, transparently logs in as the default studio demo user.
+ */
+export async function ensureAuthenticatedSession(): Promise<string> {
+  const existing = getAuthToken();
+  if (existing) {
+    const me = await fetchCurrentUser();
+    if (me) return existing;
+  }
+
+  // Auto-connect as demo user
+  try {
+    return await loginUser("demo@echovoice.ai", "DemoPassword123!");
+  } catch {
+    return await registerUser("demo@echovoice.ai", "DemoPassword123!", "EchoVoice Demo");
+  }
+}
+
+/**
+ * Retrieves valid Bearer token, auto-bootstrapping if none is set.
+ */
+export async function getValidAuthToken(): Promise<string> {
+  const token = getAuthToken();
+  if (token) return token;
+  return await ensureAuthenticatedSession();
 }
 
 // -------------------------------------------------------------
 // Voice Profiles & Quality Analysis
 // -------------------------------------------------------------
 
+function getSafeAudioFilename(file: File | Blob): string {
+  if (file instanceof File && file.name) {
+    return file.name;
+  }
+  const type = file.type || "";
+  if (type.includes("webm")) return "recording.webm";
+  if (type.includes("ogg")) return "recording.ogg";
+  if (type.includes("mp4") || type.includes("m4a")) return "recording.m4a";
+  if (type.includes("mp3")) return "recording.mp3";
+  return "recording.wav";
+}
+
 export async function analyzeAudioQuality(file: File | Blob): Promise<AudioQualityMetrics> {
   const formData = new FormData();
-  formData.append("file", file, "recording.wav");
+  formData.append("file", file, getSafeAudioFilename(file));
 
   const res = await fetch(`${API_BASE}/voice-profiles/analyze-quality`, {
     method: "POST",
@@ -127,7 +252,7 @@ export async function previewCleanAudio(
   options?: { enableDenoise?: boolean; enableVadTrim?: boolean; targetLufs?: number }
 ): Promise<CleanPreviewResult> {
   const formData = new FormData();
-  formData.append("file", file, "recording.wav");
+  formData.append("file", file, getSafeAudioFilename(file));
   formData.append("enable_denoise", String(options?.enableDenoise ?? true));
   formData.append("enable_vad_trim", String(options?.enableVadTrim ?? true));
   formData.append("target_lufs", String(options?.targetLufs ?? -14.0));
@@ -152,17 +277,16 @@ export async function enrollVoiceProfile(
   description: string,
   consentGiven: boolean
 ): Promise<VoiceProfile> {
+  const token = await getValidAuthToken();
   const formData = new FormData();
-  formData.append("file", file, "recording.wav");
+  formData.append("file", file, getSafeAudioFilename(file));
   formData.append("name", name);
   formData.append("description", description);
   formData.append("consent_given", String(consentGiven));
 
-  const headers: HeadersInit = {};
-  const token = getAuthToken();
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
+  const headers: HeadersInit = {
+    Authorization: `Bearer ${token}`,
+  };
 
   const res = await fetch(`${API_BASE}/voice-profiles/enroll`, {
     method: "POST",
@@ -180,45 +304,50 @@ export async function enrollVoiceProfile(
 }
 
 export async function fetchUserProfiles(): Promise<VoiceProfile[]> {
-  const headers: HeadersInit = {};
-  const token = getAuthToken();
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
+  try {
+    const token = await getValidAuthToken();
+    const headers: HeadersInit = {
+      Authorization: `Bearer ${token}`,
+    };
 
-  const res = await fetch(`${API_BASE}/voice-profiles/`, {
-    method: "GET",
-    headers,
-  });
+    const res = await fetch(`${API_BASE}/voice-profiles/`, {
+      method: "GET",
+      headers,
+    });
 
-  if (!res.ok) {
+    if (!res.ok) {
+      return [];
+    }
+
+    const json = await res.json();
+    return json.data || [];
+  } catch {
     return [];
   }
-
-  const json = await res.json();
-  return json.data || [];
 }
 
 export async function deleteVoiceProfile(profileId: string): Promise<boolean> {
-  const headers: HeadersInit = {};
-  const token = getAuthToken();
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
+  try {
+    const token = await getValidAuthToken();
+    const headers: HeadersInit = {
+      Authorization: `Bearer ${token}`,
+    };
 
-  const res = await fetch(`${API_BASE}/voice-profiles/${profileId}`, {
-    method: "DELETE",
-    headers,
-  });
-  return res.ok;
+    const res = await fetch(`${API_BASE}/voice-profiles/${profileId}`, {
+      method: "DELETE",
+      headers,
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 export async function setDefaultVoiceProfile(profileId: string): Promise<VoiceProfile> {
-  const headers: HeadersInit = {};
-  const token = getAuthToken();
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
+  const token = await getValidAuthToken();
+  const headers: HeadersInit = {
+    Authorization: `Bearer ${token}`,
+  };
 
   const res = await fetch(`${API_BASE}/voice-profiles/${profileId}/default`, {
     method: "POST",
@@ -267,11 +396,11 @@ export async function submitTTSJob(params: {
   engine?: string;
   mastering_preset?: string;
 }): Promise<TTSJob> {
-  const headers: HeadersInit = { "Content-Type": "application/json" };
-  const token = getAuthToken();
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
+  const token = await getValidAuthToken();
+  const headers: HeadersInit = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${token}`,
+  };
 
   const res = await fetch(`${API_BASE}/tts-jobs`, {
     method: "POST",
@@ -295,11 +424,10 @@ export async function submitTTSJob(params: {
 }
 
 export async function getTTSJob(jobId: string): Promise<TTSJob> {
-  const headers: HeadersInit = {};
-  const token = getAuthToken();
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
+  const token = await getValidAuthToken();
+  const headers: HeadersInit = {
+    Authorization: `Bearer ${token}`,
+  };
 
   const res = await fetch(`${API_BASE}/tts-jobs/${jobId}`, {
     method: "GET",
@@ -316,31 +444,33 @@ export async function getTTSJob(jobId: string): Promise<TTSJob> {
 }
 
 export async function listTTSJobs(): Promise<TTSJob[]> {
-  const headers: HeadersInit = {};
-  const token = getAuthToken();
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
+  try {
+    const token = await getValidAuthToken();
+    const headers: HeadersInit = {
+      Authorization: `Bearer ${token}`,
+    };
 
-  const res = await fetch(`${API_BASE}/tts-jobs`, {
-    method: "GET",
-    headers,
-  });
+    const res = await fetch(`${API_BASE}/tts-jobs`, {
+      method: "GET",
+      headers,
+    });
 
-  if (!res.ok) {
+    if (!res.ok) {
+      return [];
+    }
+
+    const json = await res.json();
+    return json.data || [];
+  } catch {
     return [];
   }
-
-  const json = await res.json();
-  return json.data || [];
 }
 
 export async function resumeTTSJob(jobId: string): Promise<TTSJob> {
-  const headers: HeadersInit = {};
-  const token = getAuthToken();
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
+  const token = await getValidAuthToken();
+  const headers: HeadersInit = {
+    Authorization: `Bearer ${token}`,
+  };
 
   const res = await fetch(`${API_BASE}/tts-jobs/${jobId}/resume`, {
     method: "POST",
@@ -357,11 +487,10 @@ export async function resumeTTSJob(jobId: string): Promise<TTSJob> {
 }
 
 export async function cancelTTSJob(jobId: string): Promise<TTSJob> {
-  const headers: HeadersInit = {};
-  const token = getAuthToken();
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
+  const token = await getValidAuthToken();
+  const headers: HeadersInit = {
+    Authorization: `Bearer ${token}`,
+  };
 
   const res = await fetch(`${API_BASE}/tts-jobs/${jobId}/cancel`, {
     method: "POST",

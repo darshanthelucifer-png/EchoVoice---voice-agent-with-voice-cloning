@@ -78,6 +78,38 @@ class XTTSEngine(TTSEngine):
             logger.debug(f"Local Coqui XTTS not active: {e}")
             return None
 
+    VOICE_CLONE_SPACES = [
+        {"space": "tonyassi/voice-clone", "endpoint": "/clone", "param": "audio"},
+        {"space": "SachinAmliyar15/voice-clone-free", "endpoint": "/clone_voice", "param": "audio_sample"},
+    ]
+
+    def _is_space_running(self, space_id: str) -> bool:
+        """Fast check to verify space is currently in RUNNING state on Hugging Face."""
+        disabled_attr = f"_disabled_{space_id.replace('/', '_')}"
+        if getattr(self, disabled_attr, False):
+            disabled_time = getattr(self, f"{disabled_attr}_time", 0)
+            if time.time() - disabled_time < 180:
+                return False
+        try:
+            import urllib.request
+            import json
+            req = urllib.request.Request(
+                f"https://huggingface.co/api/spaces/{space_id}",
+                headers={"User-Agent": "EchoVoice-TTS/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                stage = data.get("runtime", {}).get("stage")
+                if stage == "RUNNING":
+                    return True
+                setattr(self, disabled_attr, True)
+                setattr(self, f"{disabled_attr}_time", time.time())
+                return False
+        except Exception:
+            setattr(self, disabled_attr, True)
+            setattr(self, f"{disabled_attr}_time", time.time())
+            return False
+
     def _synthesize_via_hf_space(
         self,
         text: str,
@@ -85,25 +117,66 @@ class XTTSEngine(TTSEngine):
         language: str,
         speed: float = 1.0
     ) -> Optional[np.ndarray]:
-        """Synthesize using a free Hugging Face Space via gradio_client."""
-        try:
-            from gradio_client import Client, handle_file
-            token = settings.HF_TOKEN if settings.HF_TOKEN else None
-            client = Client(self._hf_space, token=token)
+        """Synthesize zero-shot voice clone using active Hugging Face GPU Spaces via gradio_client."""
+        if getattr(self, "_zerogpu_quota_exceeded", False):
+            if time.time() - getattr(self, "_zerogpu_quota_time", 0) < 1800:
+                return None
 
-            # XTTS-v2 Gradio standard parameters: (text, language, audio_file, ...)
-            result = client.predict(
-                prompt=text,
-                language=language,
-                audio_file_pth=handle_file(str(speaker_wav)),
-                api_name="/predict"
-            )
-            if result and Path(result).exists():
-                audio, _ = AudioCleanupPipeline.load_audio(result, target_sr=24000)
-                return audio
-        except Exception as e:
-            logger.debug(f"HF Space XTTS call note: {e}")
+        from gradio_client import Client, handle_file
+
+        sp_path = Path(speaker_wav)
+        if not sp_path.is_absolute():
+            sp_path = (Path.cwd() / sp_path).resolve()
+        if not sp_path.exists():
+            logger.warning(f"Speaker reference audio not found at: {sp_path}")
             return None
+
+        # Check configured custom space or fallback to our active GPU spaces
+        spaces_to_try = []
+        if self._hf_space and self._hf_space not in ["coqui/xtts"]:
+            spaces_to_try.append({"space": self._hf_space, "endpoint": "/clone", "param": "audio"})
+        spaces_to_try.extend(self.VOICE_CLONE_SPACES)
+
+        for s_cfg in spaces_to_try:
+            space_id = s_cfg["space"]
+            endpoint = s_cfg["endpoint"]
+            audio_param = s_cfg["param"]
+
+            if not self._is_space_running(space_id):
+                continue
+
+            try:
+                logger.info(f"Invoking neural voice cloning on GPU Space '{space_id}' ({endpoint})...")
+                token = settings.HF_TOKEN if settings.HF_TOKEN else None
+                client = Client(space_id, token=token)
+
+                kwargs = {
+                    "text": text,
+                    audio_param: handle_file(str(sp_path)),
+                    "api_name": endpoint
+                }
+                if endpoint == "/clone_voice":
+                    kwargs["language"] = "hi" if language.lower() in ["hi", "hindi"] else "en"
+
+                result = client.predict(**kwargs)
+
+                if result and Path(result).exists():
+                    audio, _ = AudioCleanupPipeline.load_audio(result, target_sr=24000)
+                    logger.info(f"Voice cloning successful from '{space_id}' ({len(audio)/24000:.2f}s audio generated)")
+                    return audio
+            except Exception as e:
+                err_str = str(e)
+                logger.warning(f"Voice cloning space '{space_id}' attempt note: {err_str}")
+                disabled_attr = f"_disabled_{space_id.replace('/', '_')}"
+                setattr(self, disabled_attr, True)
+                setattr(self, f"{disabled_attr}_time", time.time())
+                if "ZeroGPU runs limit" in err_str:
+                    logger.info("ZeroGPU free quota limit active. Seamlessly using local pitch-adaptive neural voice engine.")
+                    self._zerogpu_quota_exceeded = True
+                    self._zerogpu_quota_time = time.time()
+                    break
+
+        return None
 
     @timed_step("XTTS-v2 Voice Synthesis")
     def _synthesize_sync(
@@ -125,15 +198,23 @@ class XTTSEngine(TTSEngine):
             logger.info(f"Language '{language}' not directly in XTTS-v2 17 native set; using 'en' voice base.")
             lang = "en"
 
+        resolved_speaker: Optional[Path] = None
+        if speaker_wav:
+            p = Path(speaker_wav)
+            if not p.is_absolute():
+                p = (Path.cwd() / p).resolve()
+            if p.exists():
+                resolved_speaker = p
+
         # 1. Attempt Local Coqui XTTS if speaker wav is provided
-        if speaker_wav and Path(speaker_wav).exists():
-            audio_arr = self._synthesize_via_local_coqui(text, speaker_wav, lang, speed)
+        if resolved_speaker:
+            audio_arr = self._synthesize_via_local_coqui(text, resolved_speaker, lang, speed)
             if audio_arr is not None:
                 method_used = "local_coqui"
 
         # 2. Attempt Remote Hugging Face Space
-        if audio_arr is None and speaker_wav and Path(speaker_wav).exists():
-            audio_arr = self._synthesize_via_hf_space(text, speaker_wav, lang, speed)
+        if audio_arr is None and resolved_speaker:
+            audio_arr = self._synthesize_via_hf_space(text, resolved_speaker, lang, speed)
             if audio_arr is not None:
                 method_used = "hf_space_gradio"
 
@@ -141,7 +222,7 @@ class XTTSEngine(TTSEngine):
         if audio_arr is None:
             fallback_out = self._fallback._synthesize_sync(
                 text=text,
-                speaker_wav=speaker_wav,
+                speaker_wav=resolved_speaker or speaker_wav,
                 language=language,
                 speed=speed,
                 emotion=emotion

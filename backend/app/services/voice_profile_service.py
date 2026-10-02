@@ -199,14 +199,12 @@ class VoiceProfileService(BaseService[VoiceProfile]):
         )
         return list(res.scalars().all())
 
-    async def get_profile_by_id(self, db: AsyncSession, profile_id: str, user_id: str) -> Optional[VoiceProfile]:
-        """Fetch profile verifying ownership."""
-        res = await db.execute(
-            select(VoiceProfile).where(
-                VoiceProfile.id == profile_id,
-                VoiceProfile.user_id == user_id
-            )
-        )
+    async def get_profile_by_id(self, db: AsyncSession, profile_id: str, user_id: Optional[str] = None) -> Optional[VoiceProfile]:
+        """Fetch profile verifying ownership if user_id is provided, or by profile ID directly."""
+        stmt = select(VoiceProfile).where(VoiceProfile.id == profile_id)
+        if user_id:
+            stmt = stmt.where(VoiceProfile.user_id == user_id)
+        res = await db.execute(stmt)
         return res.scalars().first()
 
     async def set_default_profile(self, db: AsyncSession, profile_id: str, user_id: str) -> VoiceProfile:
