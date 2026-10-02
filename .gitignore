@@ -1,0 +1,56 @@
+# Python & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environment
+venv/
+.venv/
+env/
+ENV/
+
+# Environment Variables & Secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Database & Storage
+*.db
+*.sqlite
+*.sqlite3
+data/
+echovoice.db
+
+# Audio Artifacts & Checkpoints
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+checkpoints/
+exports/
+uploads/
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# Node & Frontend
+node_modules/
+dist/
+build/
+.next/
