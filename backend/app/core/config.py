@@ -151,6 +151,31 @@ class Settings(BaseSettings):
     TRANSLATE_MODEL: str = "facebook/nllb-200-distilled-600M"
     ENHANCE_MODEL: str = "ResembleAI/resemble-enhance"
 
+    # --- Speaker Similarity & Likeness Evaluation Models ---
+    SPEAKER_SIMILARITY_ECAPA_MODEL: str = "speechbrain/spkrec-ecapa-voxceleb"
+    SPEAKER_SIMILARITY_WAVLM_MODEL: str = "microsoft/wavlm-base-plus-sv"
+    SIMILARITY_TARGET_SCORE: float = 0.85
+    EVAL_ASR_MODEL: str = "openai/whisper-tiny"
+    EVAL_DEVICE: str = "auto"
+
+    # --- Tier 2: Seed-VC Voice Conversion Configuration ---
+    SEED_VC_MODEL_ID: str = "Plachta/Seed-VC"
+    SEED_VC_USE_SPACE: bool = False
+    SEED_VC_SPACE_ID: str = "Plachta/Seed-VC"
+    SEED_VC_DIFFUSION_STEPS: int = 10
+    SEED_VC_F0_CONDITION: bool = True
+    SEED_VC_AUTO_FALLBACK_TO_SPACE: bool = True
+    TIER2_LIKENESS_GATE: float = 0.85
+    AUTO_TIER_SELECTION: bool = True
+
+    # --- Tier 3: RVC v2 Custom Voice Model Configuration ---
+    RVC_HUBERT_MODEL: str = "facebook/hubert-base-ls960"
+    RVC_PITCH_EXTRACTOR: str = "rmvpe"
+    RVC_MODELS_DIR: Path = Path("./data/models/rvc")
+    RVC_INDEX_TOP_K: int = 8
+    RVC_INDEX_INFLUENCE: float = 0.85
+    TIER3_LIKENESS_GATE: float = 0.90
+
     # --- RAG & Vector Store Defaults ---
     RAG_CHUNK_SIZE: int = 600
     RAG_CHUNK_OVERLAP: int = 100
@@ -161,6 +186,23 @@ class Settings(BaseSettings):
     DEFAULT_MASTERING_PRESET: str = "youtube_voiceover"
     TARGET_LUFS: float = -14.0
     TRUE_PEAK_DB: float = -1.5
+
+    # --- Phase 5 & 6: Song Studio, SVC & Remastering Configuration ---
+    STEM_SEPARATION_MODEL: str = "htdemucs"
+    STEM_SEPARATION_DEVICE: str = "auto"
+    STEM_SEPARATION_FAST_MODE: bool = False
+    SONG_STUDIO_DIR: Path = Path("./data/song_studio")
+    VOCAL_DEREVERB_STRENGTH: float = 0.50
+    SONG_PITCH_EXTRACTOR: str = "rmvpe"
+    SONG_SVC_DEFAULT_TIER: str = "auto"              # "auto", "tier3", "tier2"
+    SONG_CHUNK_MAX_DURATION_SEC: float = 15.0        # Chunk length for long singing (seconds)
+    SONG_CHUNK_OVERLAP_SEC: float = 0.25             # Equal-power crossfade overlap
+    SONG_AUTOTUNE_STRENGTH: float = 0.70             # Default scale auto-tune strength
+    SONG_SIDECHAIN_DUCK_DB: float = 2.0              # Vocal mid pocket ducking
+    SONG_MASTER_TARGET_LUFS: float = -14.0           # YouTube standard (-14 LUFS)
+    SONG_MASTER_TRUE_PEAK_DB: float = -1.0           # True peak <= -1.0 dBTP
+    SONG_QUALITY_SIMILARITY_GATE: float = 0.85       # Biometric likeness target (>= 0.85)
+    SONG_OCTAVE_ERROR_TOLERANCE_HZ: float = 12.0     # Pitch tracking discrepancy tolerance
 
     # --- Rate Limiting ---
     RATE_LIMIT_DEFAULT: str = "100/minute"
@@ -179,6 +221,8 @@ class Settings(BaseSettings):
             self.CHECKPOINTS_DIR,
             self.VECTOR_STORE_DIR,
             self.DOCUMENTS_DIR,
+            self.RVC_MODELS_DIR,
+            self.SONG_STUDIO_DIR,
         ]:
             directory.mkdir(parents=True, exist_ok=True)
 

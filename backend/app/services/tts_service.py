@@ -18,31 +18,78 @@ from app.core.logging import logger
 from app.ai.audio.cleanup import AudioCleanupPipeline
 from app.ai.tts.base import TTSOutput
 from app.ai.tts.registry import get_tts_engine
+from app.services.voice_engine_service import voice_engine_service, TieredSynthesisResult
 
 
 class TTSService:
     """
     Manages speech synthesis requests, voice cloning conditioning,
+    multi-tier auto-selection (Tier 1 XTTS -> Tier 2 Seed-VC -> Tier 3 RVC),
     and A/B perceptual benchmarking.
     """
 
     async def generate_speech(
         self,
         text: str,
-        speaker_wav: Optional[Union[str, Path]] = None,
+        speaker_wav: Optional[Union[str, Path, np.ndarray]] = None,
+        voice_profile_id: Optional[str] = None,
         language: str = "en",
         speed: float = 1.0,
         emotion: Optional[str] = None,
         engine_name: Optional[str] = None,
-        output_filename: Optional[str] = None
+        output_filename: Optional[str] = None,
+        auto_tier_selection: bool = True,
+        target_likeness: float = 0.85,
+        force_tier: Optional[str] = None
     ) -> Tuple[TTSOutput, Path]:
         """
-        Synthesizes speech and persists the resulting WAV file to the exports directory.
+        Synthesizes speech with optional multi-tier voice cloning (Tier 1 zero-shot
+        escalating to Tier 2 Seed-VC if likeness is < 0.85). Persists output WAV.
         """
-        engine = get_tts_engine(engine_name)
         clean_text = text.strip()
 
-        # Run synthesis
+        # If a voice reference or profile is provided and auto-tier or forced tier is enabled
+        has_speaker_target = bool(speaker_wav or voice_profile_id)
+        if has_speaker_target and (auto_tier_selection or force_tier):
+            tiered_res: TieredSynthesisResult = await voice_engine_service.synthesize(
+                text=clean_text,
+                speaker_wav=speaker_wav,
+                profile_id=voice_profile_id,
+                language=language,
+                speed=speed,
+                emotion=emotion,
+                base_engine=engine_name or settings.TTS_ENGINE,
+                auto_tier_selection=auto_tier_selection,
+                target_likeness=target_likeness,
+                force_tier=force_tier
+            )
+
+            fname = output_filename or f"tts_{int(tiered_res.total_latency_ms)}_{tiered_res.tier_used}.wav"
+            save_path = settings.EXPORTS_DIR / fname
+            AudioCleanupPipeline.save_audio(tiered_res.audio, tiered_res.sample_rate, save_path)
+
+            output = TTSOutput(
+                audio=tiered_res.audio,
+                sample_rate=tiered_res.sample_rate,
+                duration_seconds=tiered_res.duration_seconds,
+                latency_ms=tiered_res.total_latency_ms,
+                engine_name=tiered_res.tier_used,
+                language=language,
+                speaker_reference=str(speaker_wav) if speaker_wav else voice_profile_id,
+                metadata={
+                    "tier_used": tiered_res.tier_used,
+                    "tier1_likeness": tiered_res.tier1_likeness,
+                    "tier2_likeness": tiered_res.tier2_likeness,
+                    "final_likeness": tiered_res.final_likeness,
+                    "passed_gate": tiered_res.passed_gate,
+                    "user_flag": tiered_res.user_flag,
+                    **tiered_res.telemetry
+                }
+            )
+            return output, save_path
+
+        # Standard direct engine synthesis
+        engine = get_tts_engine(engine_name)
         output = await engine.synthesize(
             text=clean_text,
             speaker_wav=speaker_wav,
@@ -51,7 +98,6 @@ class TTSService:
             emotion=emotion
         )
 
-        # Save audio file
         fname = output_filename or f"tts_{int(output.latency_ms)}_{engine.engine_name}.wav"
         save_path = settings.EXPORTS_DIR / fname
         AudioCleanupPipeline.save_audio(output.audio, output.sample_rate, save_path)

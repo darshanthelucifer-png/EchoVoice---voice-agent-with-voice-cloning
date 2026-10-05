@@ -16,6 +16,11 @@ from app.ai.audio.cleanup import (
     CleanupResult,
     cleanup_pipeline,
 )
+from app.ai.audio.similarity import (
+    SpeakerSimilarityEvaluator,
+    SpeakerSimilarityResult,
+    speaker_similarity_evaluator,
+)
 
 __all__ = [
     "SileroVADProcessor",
@@ -27,4 +32,7 @@ __all__ = [
     "CleanupConfig",
     "CleanupResult",
     "cleanup_pipeline",
+    "SpeakerSimilarityEvaluator",
+    "SpeakerSimilarityResult",
+    "speaker_similarity_evaluator",
 ]

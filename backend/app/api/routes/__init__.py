@@ -15,6 +15,7 @@ from app.api.routes.knowledge import router as knowledge_router
 from app.api.routes.chat import router as chat_router
 from app.api.routes.metrics import router as metrics_router
 from app.api.routes.ws_realtime import router as ws_realtime_router
+from app.api.routes.song import router as song_router
 
 __all__ = [
     "auth_router",
@@ -28,4 +29,6 @@ __all__ = [
     "chat_router",
     "metrics_router",
     "ws_realtime_router",
+    "song_router",
 ]
+

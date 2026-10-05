@@ -75,10 +75,14 @@ def test_vad_detection_and_trimming():
 def test_audio_cleanup_pipeline():
     """Verify DC offset removal, denoise, and peak normalization."""
     sr = 24000
-    speech = create_test_tone(4.0, sr=sr)
+    # Tone with speech pause so 10th percentile reflects noise floor
+    tone1 = create_test_tone(1.5, sr=sr)
+    pause = np.zeros(int(sr * 1.0), dtype=np.float32)
+    tone2 = create_test_tone(1.5, sr=sr)
+    speech = np.concatenate([tone1, pause, tone2])
     
     # Add DC offset and electrical hum
-    t = np.linspace(0, 4.0, len(speech), endpoint=False)
+    t = np.linspace(0, len(speech) / sr, len(speech), endpoint=False)
     hum = 0.05 * np.sin(2 * np.pi * 50 * t)
     noise = np.random.normal(0, 0.04, len(speech)).astype(np.float32)
     corrupted = speech + hum + noise + 0.02  # DC offset = 0.02

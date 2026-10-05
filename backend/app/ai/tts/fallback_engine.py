@@ -137,7 +137,7 @@ class LocalFallbackEngine(TTSEngine):
 
             async def _run_edge():
                 comm = edge_tts.Communicate(text, chosen_voice, pitch=pitch_str, rate=rate_str)
-                await comm.save(str(tmp_path))
+                await asyncio.wait_for(comm.save(str(tmp_path)), timeout=4.0)
 
             asyncio.run(_run_edge())
 
@@ -145,12 +145,13 @@ class LocalFallbackEngine(TTSEngine):
                 audio_arr, _ = AudioCleanupPipeline.load_audio(tmp_path, target_sr=sr)
                 tmp_path.unlink(missing_ok=True)
         except Exception as e:
-            logger.info(f"Edge-TTS synthesis note: {e}. Falling back to OS synthesis.")
+            logger.debug(f"Edge-TTS synthesis note: {e}. Falling back to OS synthesis.")
 
         # 2. Try pyttsx3 OS synthesis fallback
         if audio_arr is None or len(audio_arr) == 0:
             try:
                 import pyttsx3
+                # Initialize engine safely
                 engine = pyttsx3.init()
                 wpm = int(175 * speed)
                 engine.setProperty("rate", wpm)

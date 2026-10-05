@@ -9,7 +9,7 @@ PYTHON CONCEPTS DEMONSTRATED:
 """
 
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, status
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -140,11 +140,10 @@ async def enroll_voice_profile(
             detail="Uploaded audio file is empty."
         )
 
-    cfg = CleanupConfig(
-        enable_denoise=enable_denoise,
-        enable_vad_trim=enable_vad_trim,
-        target_lufs=target_lufs
+    cfg = CleanupConfig.for_reference(
+        denoise_strength=0.20 if enable_denoise else 0.0,
     )
+    cfg.enable_vad_trim = enable_vad_trim
 
     profile, result = await voice_profile_service.enroll_profile(
         db=db,
@@ -281,6 +280,90 @@ async def get_profile_raw_audio(
         media_type="audio/wav",
         filename=f"{profile.name}_raw.wav"
     )
+
+
+@router.get(
+    "/{profile_id}/tier3-status",
+    summary="Check Tier 3 RVC v2 model training readiness and status"
+)
+async def get_tier3_status(
+    profile_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+) -> APIResponse[Dict[str, Any]]:
+    """Checks whether the profile has a trained Tier 3 RVC model and meets the >= 3min threshold."""
+    profile = await voice_profile_service.get_profile_by_id(db, profile_id, current_user.id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Voice profile not found.")
+
+    from app.ai.vc.rvc_engine import rvc_engine
+    has_model = rvc_engine.has_profile_model(profile_id)
+    paths = rvc_engine.get_profile_model_paths(profile_id)
+
+    duration_sec = 0.0
+    if profile.reference_audio_path and Path(profile.reference_audio_path).exists():
+        try:
+            arr, sr = AudioCleanupPipeline.load_audio(Path(profile.reference_audio_path))
+            duration_sec = len(arr) / sr
+        except Exception:
+            pass
+
+    return APIResponse(
+        success=True,
+        data={
+            "profile_id": profile_id,
+            "has_tier3_model": has_model,
+            "is_eligible": duration_sec >= 180.0,
+            "recorded_duration_seconds": round(duration_sec, 1),
+            "required_duration_seconds": 180.0,
+            "model_pth": paths[0].name if paths else None,
+            "model_index": paths[1].name if paths else None,
+            "notice": (
+                "Tier 3 active! Exact voice conversion enabled." if has_model else (
+                    "Audio length >= 3 min. Ready to train dedicated Tier 3 RVC model."
+                    if duration_sec >= 180.0 else
+                    f"Recorded {duration_sec:.1f}s. Record 3+ minutes to unlock Tier 3 exact voice model."
+                )
+            ),
+            "colab_notebook_path": "backend/notebooks/EchoVoice_RVC_v2_Trainer.ipynb"
+        }
+    )
+
+
+@router.post(
+    "/{profile_id}/train-rvc",
+    summary="Trigger local/server RVC v2 model training for voice profile"
+)
+async def trigger_rvc_training(
+    profile_id: str,
+    force: bool = False,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+) -> APIResponse[Dict[str, Any]]:
+    """Initiates Tier 3 RVC v2 dataset preprocessing, Faiss vector indexing, and model checkpointing."""
+    profile = await voice_profile_service.get_profile_by_id(db, profile_id, current_user.id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Voice profile not found.")
+
+    from scripts.train_rvc import train_rvc_model
+    try:
+        result = await asyncio.to_thread(
+            train_rvc_model,
+            profile_id=profile_id,
+            input_audio_path=Path(profile.reference_audio_path) if profile.reference_audio_path else None,
+            force=force
+        )
+        return APIResponse(
+            success=True,
+            message="Tier 3 RVC v2 model trained successfully!",
+            data=result
+        )
+    except Exception as exc:
+        logger.error(f"RVC training failed for profile {profile_id}: {exc}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Tier 3 training failed: {str(exc)}"
+        )
 
 
 @router.get(

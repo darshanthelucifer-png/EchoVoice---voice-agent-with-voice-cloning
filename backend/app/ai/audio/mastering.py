@@ -368,3 +368,5 @@ class YouTubeAudioMasteringEngine:
 
 
 youtube_mastering_engine = YouTubeAudioMasteringEngine()
+audio_mastering_engine = youtube_mastering_engine
+

@@ -185,7 +185,10 @@ class XTTSEngine(TTSEngine):
         speaker_wav: Optional[Union[str, Path]] = None,
         language: str = "en",
         speed: float = 1.0,
-        emotion: Optional[str] = None
+        emotion: Optional[str] = None,
+        temperature: float = 0.25,
+        fixed_seed: Optional[int] = 42,
+        **kwargs: Any
     ) -> TTSOutput:
         start_time = time.perf_counter()
         sr = 24000
@@ -198,12 +201,20 @@ class XTTSEngine(TTSEngine):
             logger.info(f"Language '{language}' not directly in XTTS-v2 17 native set; using 'en' voice base.")
             lang = "en"
 
+        # Resolve speaker reference: check if given path or nearby clips/clip_1.wav exists
         resolved_speaker: Optional[Path] = None
         if speaker_wav:
             p = Path(speaker_wav)
             if not p.is_absolute():
                 p = (Path.cwd() / p).resolve()
-            if p.exists():
+            if p.is_dir():
+                best_clip = p / "clips" / "clip_1.wav"
+                ref_wav = p / "reference.wav"
+                if best_clip.exists():
+                    resolved_speaker = best_clip
+                elif ref_wav.exists():
+                    resolved_speaker = ref_wav
+            elif p.exists():
                 resolved_speaker = p
 
         # 1. Attempt Local Coqui XTTS if speaker wav is provided
@@ -240,8 +251,15 @@ class XTTSEngine(TTSEngine):
             latency_ms=round(latency, 2),
             engine_name="xtts_v2",
             language=lang,
-            speaker_reference=str(speaker_wav) if speaker_wav else None,
-            metadata={"backend": method_used, "emotion": emotion, "speed": speed}
+            speaker_reference=str(resolved_speaker or speaker_wav) if (resolved_speaker or speaker_wav) else None,
+            metadata={
+                "backend": method_used,
+                "tier": "Tier 1: Zero-shot XTTS-v2",
+                "emotion": emotion,
+                "speed": speed,
+                "temperature": temperature,
+                "fixed_seed": fixed_seed
+            }
         )
 
     async def synthesize(
@@ -251,6 +269,8 @@ class XTTSEngine(TTSEngine):
         language: str = "en",
         speed: float = 1.0,
         emotion: Optional[str] = None,
+        temperature: float = 0.25,
+        fixed_seed: Optional[int] = 42,
         **kwargs: Any
     ) -> TTSOutput:
         return await asyncio.to_thread(
@@ -259,7 +279,10 @@ class XTTSEngine(TTSEngine):
             speaker_wav,
             language,
             speed,
-            emotion
+            emotion,
+            temperature,
+            fixed_seed,
+            **kwargs
         )
 
     async def synthesize_stream(

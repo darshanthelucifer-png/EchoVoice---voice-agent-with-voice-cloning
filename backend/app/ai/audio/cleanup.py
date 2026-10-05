@@ -29,40 +29,112 @@ from app.ai.audio.quality import quality_analyzer, AudioQualityReport
 class CleanupConfig:
     """
     Configuration options for the audio cleanup pipeline.
-    Every single processing stage can be individually toggled or tuned.
+    Provides dedicated presets for:
+    - 'reference': Light cleanup preserving natural vocal timbre, formants, and body.
+      No room-tone injection, gentle denoise (0.20), 50 Hz high-pass, no loudness compression.
+    - 'output': Full broadcast/YouTube mastering with -14 LUFS loudness and peak limiting.
     """
+    mode: str = "reference"                 # "reference", "output", or "custom"
     target_sample_rate: int = 24_000        # 24 kHz for XTTS/voice cloning or 48 kHz for studio mastering
     to_mono: bool = True
     remove_dc_offset: bool = True
     peak_pre_normalize: bool = True
-    pre_norm_dbfs: float = -3.0
+    pre_norm_dbfs: float = -1.5             # -1.5 dBFS leaves clean headroom without dynamic squashing
 
     # Vocal Isolation (Demucs)
     isolate_vocals_demucs: bool = False
 
     # Noise Reduction (Spectral Gating / DeepFilterNet)
     enable_denoise: bool = True
-    denoise_prop_decrease: float = 0.80     # Fraction of noise to reduce (0.8 avoids underwater artifacts)
+    denoise_prop_decrease: float = 0.20     # Gentle 0.20 fraction preserves subtle vocal formants/harmonics
     denoise_stationary: bool = True
 
-    # Voice Enhancement (Resemble-Enhance)
+    # Voice Enhancement (Resemble-Enhance) - belongs strictly on output, not reference!
     enable_resemble_enhance: bool = False
 
-    # High-Pass Filter (Rumble removal)
+    # High-Pass Filter (Rumble removal - 50 Hz preserves male chest resonance)
     enable_highpass: bool = True
-    highpass_cutoff_hz: float = 80.0
+    highpass_cutoff_hz: float = 50.0
 
     # Silence & Pause Handling (Silero VAD)
     enable_vad_trim: bool = True
-    max_internal_pause_sec: float = 0.70
-    vad_padding_sec: float = 0.08
-    insert_room_tone: bool = True
-    room_tone_dbfs: float = -65.0          # Faint room tone prevents digital dead air
+    max_internal_pause_sec: float = 0.60
+    vad_padding_sec: float = 0.10
+    insert_room_tone: bool = False          # FALSE for reference to prevent injecting noise/hiss into voice model
+    room_tone_dbfs: float = -65.0
 
-    # YouTube-Standard Loudness Normalization
-    enable_loudness_norm: bool = True
-    target_lufs: float = -14.0              # -14 LUFS (YouTube standard) or -16 LUFS (Voice Profile reference)
+    # YouTube-Standard Loudness Normalization (believes on output mastering only)
+    enable_loudness_norm: bool = False      # Disabled for reference; reference uses peak pre-normalization
+    target_lufs: float = -14.0              # -14 LUFS (YouTube standard)
     true_peak_limit_db: float = -1.5        # Max ceiling for AAC/MP3 headroom
+
+    @classmethod
+    def for_reference(
+        cls,
+        target_sample_rate: int = 24_000,
+        denoise_strength: float = 0.20,
+        enable_denoise: bool = True
+    ) -> "CleanupConfig":
+        """
+        Factory producing an acoustically safe reference cleanup configuration.
+        Preserves speaker identity, fine formants, and chest resonance.
+        Zero artificial noise injection; no dynamics compression.
+        """
+        return cls(
+            mode="reference",
+            target_sample_rate=target_sample_rate,
+            to_mono=True,
+            remove_dc_offset=True,
+            peak_pre_normalize=True,
+            pre_norm_dbfs=-1.5,
+            isolate_vocals_demucs=False,
+            enable_denoise=enable_denoise,
+            denoise_prop_decrease=denoise_strength,
+            denoise_stationary=True,
+            enable_resemble_enhance=False,
+            enable_highpass=True,
+            highpass_cutoff_hz=50.0,
+            enable_vad_trim=True,
+            max_internal_pause_sec=0.60,
+            vad_padding_sec=0.10,
+            insert_room_tone=False,
+            enable_loudness_norm=False
+        )
+
+    @classmethod
+    def for_output(
+        cls,
+        target_sample_rate: int = 48_000,
+        target_lufs: float = -14.0,
+        enable_resemble_enhance: bool = False
+    ) -> "CleanupConfig":
+        """
+        Factory producing an output-side enhancement and mastering configuration.
+        Applies YouTube loudness normalization, peak limiting, and optional speech enhancement.
+        """
+        return cls(
+            mode="output",
+            target_sample_rate=target_sample_rate,
+            to_mono=True,
+            remove_dc_offset=True,
+            peak_pre_normalize=True,
+            pre_norm_dbfs=-3.0,
+            isolate_vocals_demucs=False,
+            enable_denoise=True,
+            denoise_prop_decrease=0.75,
+            denoise_stationary=True,
+            enable_resemble_enhance=enable_resemble_enhance,
+            enable_highpass=True,
+            highpass_cutoff_hz=80.0,
+            enable_vad_trim=True,
+            max_internal_pause_sec=0.70,
+            vad_padding_sec=0.08,
+            insert_room_tone=True,
+            room_tone_dbfs=-65.0,
+            enable_loudness_norm=True,
+            target_lufs=target_lufs,
+            true_peak_limit_db=-1.5
+        )
 
 
 @dataclass

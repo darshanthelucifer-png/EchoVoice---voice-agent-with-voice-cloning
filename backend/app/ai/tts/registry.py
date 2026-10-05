@@ -27,6 +27,8 @@ class TTSRegistry:
 
         # Register default engines
         self.register_class("xtts_v2", XTTSEngine)
+        self.register_class("tier1_zeroshot", XTTSEngine)
+        self.register_class("f5_tts", XTTSEngine)
         self.register_class("fallback", LocalFallbackEngine)
         self.register_class("local_fallback", LocalFallbackEngine)
 
